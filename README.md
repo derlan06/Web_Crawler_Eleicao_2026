@@ -51,14 +51,14 @@ Variáveis de ambiente continuam valendo como padrão (`TSE_RESULTS_BASE_URL`, `
 Exemplo de saída (eleitos em maiúsculas, em verde/negrito no terminal ou com `*` quando sem cor):
 
 ```
-==== SÃO LUÍS (07242) [1/1] ====
+==== DAVINÓPOLIS (07242) [1/1] ====
 
 Governador (cargo 3) - 1º TURNO
 +-----------------+--------+-------+------------+
 | NOME            | NÚMERO | VOTOS | SITUAÇÃO   |
 +-----------------+--------+-------+------------+
-| EDUARDO BRAIDE  |     55 |   900 | ELEITO     | *
-| ORLEANS BRANDÃO |     15 |   600 | Não eleito |
+| ORLEANS BRANDÃO |     15 |  4085 | Não eleito |
+| EDUARDO BRAIDE  |     55 |  3992 | ELEITO     | *
 +-----------------+--------+-------+------------+
 ```
 
