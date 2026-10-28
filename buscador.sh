@@ -206,6 +206,7 @@ fetch_json() {
   [[ "$FETCH_HTTP_CODE" == 200 ]]
 }
 
+# (jq.exe no Windows termina as linhas com \r; por isso as saídas do jq passam por tr -d '\r')
 # Carrega MUNI_CODES/MUNI_NAMES: todos os municípios da UF (lista oficial do TSE)
 # ou apenas o município pedido em -m.
 load_municipios() {
@@ -232,7 +233,7 @@ load_municipios() {
       | select(((.cd // "") | ascii_downcase) == $uf)
       | (.mu // [])[]
       | [.cd, .nm] | @tsv
-    ' "$file")
+    ' "$file" | tr -d '\r')
 
   if (( ${#MUNI_CODES[@]} == 0 )); then
     if [[ "$MUNICIPIO" == todos ]]; then
@@ -271,7 +272,7 @@ show_cargo() {
   jq -e '.carg | type == "array"' "$file" >/dev/null 2>&1 \
     || { warn "resposta inválida para o cargo $cargo (JSON sem a lista 'carg')"; return 1; }
 
-  cargo_name="$(jq -r --arg cargo "$cargo" '.carg[] | select(.cd == $cargo) | .nmn' "$file" | head -n 1)"
+  cargo_name="$(jq -r --arg cargo "$cargo" '.carg[] | select(.cd == $cargo) | .nmn' "$file" | tr -d '\r' | head -n 1)"
   [[ -n "$cargo_name" ]] || { warn "cargo $cargo ausente na resposta"; return 1; }
 
   printf '\n%s (cargo %s) - %dº TURNO\n' "$cargo_name" "$cargo" "$turno"
@@ -295,7 +296,7 @@ show_cargo() {
     | (if $only_elected then map(select(.situacao | test("^eleito"; "i"))) else . end)
     | .[:$limit][]
     | [.nome, .numero, (.votos | tostring), .situacao] | @tsv
-  ' "$file" >"$rows_file" || { warn "não foi possível ler os candidatos do cargo $cargo"; return 1; }
+  ' "$file" | tr -d '\r' >"$rows_file" || { warn "não foi possível ler os candidatos do cargo $cargo"; return 1; }
 
   mapfile -t rows <"$rows_file"
   if (( ${#rows[@]} == 0 )); then
