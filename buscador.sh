@@ -15,7 +15,7 @@ fi
 readonly DEFAULT_BASE_URL="https://resultados.tse.jus.br/oficial"
 readonly -a DEFAULT_CARGOS=(6 7 5 3 1)
 CARGOS=("${DEFAULT_CARGOS[@]}")
-readonly NAME_HEADER="NOME" NUMBER_HEADER="NÚMERO" VOTES_HEADER="VOTOS"
+readonly NAME_HEADER="NOME" NUMBER_HEADER="NÚMERO" VOTES_HEADER="VOTOS" STATUS_HEADER="SITUAÇÃO"
 
 BASE_URL="${TSE_RESULTS_BASE_URL:-$DEFAULT_BASE_URL}"
 YEAR="${TSE_RESULTS_YEAR:-2026}"
@@ -29,6 +29,7 @@ STATE_ELECTION="${TSE_RESULTS_STATE_ELECTION:-6259}"
 FEDERAL_ELECTION_2T="${TSE_RESULTS_FEDERAL_ELECTION_2T:-$((FEDERAL_ELECTION + 1))}"
 STATE_ELECTION_2T="${TSE_RESULTS_STATE_ELECTION_2T:-$((STATE_ELECTION + 1))}"
 ROUND="${TSE_RESULTS_ROUND:-1}"   # 1, 2 ou ambos
+ONLY_ELECTED="${TSE_RESULTS_ONLY_ELECTED:-false}"   # true: mostra só os eleitos
 COLOR_MODE="${TSE_RESULTS_COLOR:-auto}"
 
 FETCH_HTTP_CODE=""
@@ -54,6 +55,9 @@ Opções:
                 código TSE de um município (5 dígitos, ex.: 07242)
   -t TURNO      1 (padrão), 2 ou ambos. O 2º turno só existe para Presidente
                 e Governador, e apenas onde a disputa não foi decidida no 1º
+  -e            mostra somente os candidatos eleitos. "Eleito" é a situação
+                informada pelo TSE para a eleição como um todo (estado/país),
+                e não o candidato mais votado no município
   -n LIMITE     máximo de candidatos por cargo (padrão: 20)
   -c "CARGOS"   cargos separados por espaço: 1=Presidente 3=Governador
                 5=Senador 6=Dep. Federal 7=Dep. Estadual (padrão: "6 7 5 3 1")
@@ -66,11 +70,12 @@ EOT
 
 parse_args() {
   local opt OPTIND=1
-  while getopts ':u:m:t:n:c:h' opt; do
+  while getopts ':u:m:t:n:c:eh' opt; do
     case "$opt" in
       u) UF="$OPTARG" ;;
       m) MUNICIPIO="$OPTARG" ;;
       t) ROUND="$OPTARG" ;;
+      e) ONLY_ELECTED=true ;;
       n) LIMIT="$OPTARG" ;;
       c) read -r -a CARGOS <<<"$OPTARG" ;;
       h) usage; exit 0 ;;
@@ -95,6 +100,7 @@ validate_config() {
   [[ "$COLOR_MODE" =~ ^(auto|always|never)$ ]] || die "TSE_RESULTS_COLOR deve ser auto, always ou never"
   [[ "$FEDERAL_ELECTION_2T" =~ ^[0-9]+$ && "$STATE_ELECTION_2T" =~ ^[0-9]+$ ]] \
     || die "códigos de eleição do 2º turno devem ser numéricos"
+  [[ "$ONLY_ELECTED" =~ ^(true|false)$ ]] || die "TSE_RESULTS_ONLY_ELECTED deve ser true ou false"
   ROUND="${ROUND,,}"
   case "$ROUND" in
     1) TURNOS=(1) ;;
@@ -125,39 +131,56 @@ pad_right() { local n=$(( $2 - ${#1} )); (( n < 0 )) && n=0; printf -v REPLY '%s
 pad_left()  { local n=$(( $2 - ${#1} )); (( n < 0 )) && n=0; printf -v REPLY '%*s%s' "$n" '' "$1"; }
 
 print_rule() {
-  local name_width="$1" number_width="$2" votes_width="$3"
-  printf '+-%*s-+-%*s-+-%*s-+\n' "$name_width" '' "$number_width" '' "$votes_width" '' | tr ' ' '-'
+  printf '+'
+  local w
+  for w in "$@"; do printf '%*s+' "$((w + 2))" '' | tr ' ' '-'; done
+  printf '\n'
 }
+
+# is_elected SITUAÇÃO -> 0 se o TSE marcou o candidato como eleito
+# ("Eleito", "Eleito por QP", "Eleito por média"; "Não eleito" não conta).
+is_elected() { local v="${1,,}"; [[ "$v" == eleito* ]]; }
 
 print_table() {
   local -n table_rows="$1"
-  local name_width=${#NAME_HEADER} number_width=${#NUMBER_HEADER} votes_width=${#VOTES_HEADER}
-  local row name number votes
+  local name_width=${#NAME_HEADER} number_width=${#NUMBER_HEADER} votes_width=${#VOTES_HEADER} status_width=${#STATUS_HEADER}
+  local row name number votes status c1 c2 c3 c4
   for row in "${table_rows[@]}"; do
-    IFS=$'\t' read -r name number votes <<<"$row"
+    IFS=$'\t' read -r name number votes status <<<"$row"
+    is_elected "$status" && status="${status^^}"
     (( ${#name} > name_width )) && name_width=${#name}
     (( ${#number} > number_width )) && number_width=${#number}
     (( ${#votes} > votes_width )) && votes_width=${#votes}
+    (( ${#status} > status_width )) && status_width=${#status}
   done
-  local c1 c2 c3
-  print_rule "$name_width" "$number_width" "$votes_width"
-  pad_right "$NAME_HEADER" "$name_width";   c1="$REPLY"
+  print_rule "$name_width" "$number_width" "$votes_width" "$status_width"
+  pad_right "$NAME_HEADER" "$name_width";     c1="$REPLY"
   pad_left  "$NUMBER_HEADER" "$number_width"; c2="$REPLY"
-  pad_left  "$VOTES_HEADER" "$votes_width";  c3="$REPLY"
-  printf '| %s | %s | %s |\n' "$c1" "$c2" "$c3"
-  print_rule "$name_width" "$number_width" "$votes_width"
+  pad_left  "$VOTES_HEADER" "$votes_width";   c3="$REPLY"
+  pad_right "$STATUS_HEADER" "$status_width"; c4="$REPLY"
+  printf '| %s | %s | %s | %s |\n' "$c1" "$c2" "$c3" "$c4"
+  print_rule "$name_width" "$number_width" "$votes_width" "$status_width"
   for row in "${table_rows[@]}"; do
-    IFS=$'\t' read -r name number votes <<<"$row"
-    pad_right "$name" "$name_width";    c1="$REPLY"
+    IFS=$'\t' read -r name number votes status <<<"$row"
+    is_elected "$status" && status="${status^^}"
+    pad_right "$name" "$name_width";     c1="$REPLY"
     pad_left  "$number" "$number_width"; c2="$REPLY"
     pad_left  "$votes" "$votes_width";   c3="$REPLY"
-    if $use_color; then
-      printf '| \033[36m%s\033[0m | %s | \033[32m%s\033[0m |\n' "$c1" "$c2" "$c3"
+    pad_right "$status" "$status_width"; c4="$REPLY"
+    if is_elected "$status"; then
+      # eleitos: linha em negrito/verde (ou marcada com * quando sem cor)
+      if $use_color; then
+        printf '| \033[1;32m%s\033[0m | \033[1;32m%s\033[0m | \033[1;32m%s\033[0m | \033[1;32m%s\033[0m |\n' "$c1" "$c2" "$c3" "$c4"
+      else
+        printf '| %s | %s | %s | %s | *\n' "$c1" "$c2" "$c3" "$c4"
+      fi
+    elif $use_color; then
+      printf '| \033[36m%s\033[0m | %s | \033[32m%s\033[0m | %s |\n' "$c1" "$c2" "$c3" "$c4"
     else
-      printf '| %s | %s | %s |\n' "$c1" "$c2" "$c3"
+      printf '| %s | %s | %s | %s |\n' "$c1" "$c2" "$c3" "$c4"
     fi
   done
-  print_rule "$name_width" "$number_width" "$votes_width"
+  print_rule "$name_width" "$number_width" "$votes_width" "$status_width"
 }
 
 # election_for_cargo CARGO TURNO -> código da eleição no stdout.
@@ -253,22 +276,30 @@ show_cargo() {
 
   printf '\n%s (cargo %s) - %dº TURNO\n' "$cargo_name" "$cargo" "$turno"
 
-  jq -r --arg cargo "$cargo" --argjson limit "$LIMIT" '
+  jq -r --arg cargo "$cargo" --argjson limit "$LIMIT" --argjson only_elected "$ONLY_ELECTED" '
     [
       .carg[] | select(.cd == $cargo)
       | .. | objects | .cand? // empty | .[]
       | select((.nmu // "") != "" and (.n // "") != "")
-      | { nome: (.nmu | gsub("[[:cntrl:]]"; " ")), numero: .n, votos: ((.vap // "0") | tonumber) }
+      | {
+          nome: (.nmu | gsub("[[:cntrl:]]"; " ")),
+          numero: .n,
+          votos: ((.vap // "0") | tonumber),
+          situacao: (if ((.st // "") != "") then .st
+                     elif ((.e // "") == "s") then "Eleito"
+                     else "-" end)
+        }
     ]
     | unique_by(.numero)
     | sort_by([-.votos, (.nome | ascii_downcase), .numero])
+    | (if $only_elected then map(select(.situacao | test("^eleito"; "i"))) else . end)
     | .[:$limit][]
-    | [.nome, .numero, (.votos | tostring)] | @tsv
+    | [.nome, .numero, (.votos | tostring), .situacao] | @tsv
   ' "$file" >"$rows_file" || { warn "não foi possível ler os candidatos do cargo $cargo"; return 1; }
 
   mapfile -t rows <"$rows_file"
   if (( ${#rows[@]} == 0 )); then
-    printf '  (nenhum candidato com votos na resposta do TSE)\n'
+    printf '  (nenhum candidato para exibir: resposta vazia ou nenhum eleito marcado pelo TSE)\n'
     return 0
   fi
   print_table rows
