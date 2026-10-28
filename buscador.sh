@@ -20,13 +20,15 @@ readonly NAME_HEADER="NOME" NUMBER_HEADER="NÚMERO" VOTES_HEADER="VOTOS"
 BASE_URL="${TSE_RESULTS_BASE_URL:-$DEFAULT_BASE_URL}"
 YEAR="${TSE_RESULTS_YEAR:-2026}"
 UF="${TSE_RESULTS_UF:-ma}"
-MUNICIPIO="${TSE_RESULTS_MUNICIPALITY:-07242}"
+MUNICIPIO="${TSE_RESULTS_MUNICIPALITY:-todos}"   # "todos" ou código TSE de 5 dígitos
 LIMIT="${TSE_RESULTS_LIMIT:-20}"
 FEDERAL_ELECTION="${TSE_RESULTS_FEDERAL_ELECTION:-6257}"
 STATE_ELECTION="${TSE_RESULTS_STATE_ELECTION:-6259}"
 COLOR_MODE="${TSE_RESULTS_COLOR:-auto}"
 
 FETCH_HTTP_CODE=""
+MUNI_CODES=()
+MUNI_NAMES=()
 tmp_dir=""
 use_color=false
 
@@ -41,7 +43,8 @@ Consulta no TSE os candidatos mais votados por cargo.
 
 Opções:
   -u UF         sigla da UF (padrão: ma)
-  -m CÓDIGO     código TSE do município, 5 dígitos (padrão: 07242)
+  -m MUNICÍPIO  "todos" (padrão) para todos os municípios da UF, ou o
+                código TSE de um município (5 dígitos, ex.: 07242)
   -n LIMITE     máximo de candidatos por cargo (padrão: 20)
   -c "CARGOS"   cargos separados por espaço: 1=Presidente 3=Governador
                 5=Senador 6=Dep. Federal 7=Dep. Estadual (padrão: "6 7 5 3 1")
@@ -72,7 +75,9 @@ validate_config() {
   command -v curl >/dev/null || die "curl não encontrado (instale com seu gerenciador de pacotes)"
   command -v jq   >/dev/null || die "jq não encontrado (instale com seu gerenciador de pacotes)"
   [[ "$UF" =~ ^[[:alpha:]]{2}$ ]]        || die "TSE_RESULTS_UF deve conter duas letras"
-  [[ "$MUNICIPIO" =~ ^[0-9]{5}$ ]]       || die "TSE_RESULTS_MUNICIPALITY deve conter cinco dígitos"
+  MUNICIPIO="${MUNICIPIO,,}"
+  [[ "$MUNICIPIO" == todos || "$MUNICIPIO" =~ ^[0-9]{5}$ ]] \
+    || die "município deve ser 'todos' ou um código TSE de cinco dígitos (-m / TSE_RESULTS_MUNICIPALITY)"
   [[ "$YEAR" =~ ^[0-9]{4}$ ]]            || die "TSE_RESULTS_YEAR deve conter quatro dígitos"
   [[ "$LIMIT" =~ ^[1-9][0-9]*$ ]]        || die "TSE_RESULTS_LIMIT deve ser um inteiro positivo"
   [[ "$FEDERAL_ELECTION" =~ ^[0-9]+$ && "$STATE_ELECTION" =~ ^[0-9]+$ ]] \
@@ -154,9 +159,45 @@ fetch_json() {
   [[ "$FETCH_HTTP_CODE" == 200 ]]
 }
 
-# show_cargo CARGO -> imprime a tabela do cargo; status 1 em caso de falha (já avisada).
+# Carrega MUNI_CODES/MUNI_NAMES: todos os municípios da UF (lista oficial do TSE)
+# ou apenas o município pedido em -m.
+load_municipios() {
+  local election_padded election file="$tmp_dir/municipios.json" url code name found=false
+  # Arquivo EA12 do TSE: config/mun-e<eleição de 6 dígitos>-cm.json
+  # (tenta a eleição estadual e, se não existir, a federal)
+  for election in "$STATE_ELECTION" "$FEDERAL_ELECTION"; do
+    printf -v election_padded '%06d' "$election"
+    url="$BASE_URL/ele$YEAR/$election/config/mun-e${election_padded}-cm.json"
+    if fetch_json "$url" "$file"; then found=true; break; fi
+  done
+
+  if ! $found; then
+    [[ "$MUNICIPIO" == todos ]] \
+      || { MUNI_CODES=("$MUNICIPIO"); MUNI_NAMES=("$MUNICIPIO"); return 0; }
+    die "não foi possível obter a lista de municípios (HTTP $FETCH_HTTP_CODE): $url"
+  fi
+
+  while IFS=$'\t' read -r code name; do
+    [[ "$MUNICIPIO" == todos || "$MUNICIPIO" == "$code" ]] || continue
+    MUNI_CODES+=("$code"); MUNI_NAMES+=("$name")
+  done < <(jq -r --arg uf "$UF" '
+      (.abr // [])[]
+      | select(((.cd // "") | ascii_downcase) == $uf)
+      | (.mu // [])[]
+      | [.cd, .nm] | @tsv
+    ' "$file")
+
+  if (( ${#MUNI_CODES[@]} == 0 )); then
+    if [[ "$MUNICIPIO" == todos ]]; then
+      die "nenhum município encontrado para a UF '$UF' em $url"
+    fi
+    MUNI_CODES=("$MUNICIPIO"); MUNI_NAMES=("$MUNICIPIO")   # código fora da lista: tenta mesmo assim
+  fi
+}
+
+# show_cargo MUNICÍPIO CARGO -> imprime a tabela do cargo; status 1 em caso de falha (já avisada).
 show_cargo() {
-  local cargo="$1" election file rows_file url cargo_name cargo_padded election_padded
+  local muni="$1" cargo="$2" election file rows_file url cargo_name cargo_padded election_padded
   local -a rows=()
 
   election="$(election_for_cargo "$cargo")" || { warn "cargo não suportado: $cargo"; return 1; }
@@ -164,10 +205,10 @@ show_cargo() {
   rows_file="$tmp_dir/cargo-$cargo.tsv"
   printf -v cargo_padded '%04d' "$cargo"
   printf -v election_padded '%06d' "$election"
-  url="$BASE_URL/ele$YEAR/$election/dados/$UF/${UF}${MUNICIPIO}-c${cargo_padded}-e${election_padded}-u.json"
+  url="$BASE_URL/ele$YEAR/$election/dados/$UF/${UF}${muni}-c${cargo_padded}-e${election_padded}-u.json"
 
   fetch_json "$url" "$file" \
-    || { warn "falha ao consultar o cargo $cargo (HTTP $FETCH_HTTP_CODE): $url"; return 1; }
+    || { warn "falha ao consultar o cargo $cargo no município $muni (HTTP $FETCH_HTTP_CODE): $url"; return 1; }
   jq -e '.carg | type == "array"' "$file" >/dev/null 2>&1 \
     || { warn "resposta inválida para o cargo $cargo (JSON sem a lista 'carg')"; return 1; }
 
@@ -204,11 +245,16 @@ main() {
   tmp_dir="$(mktemp -d)"
   trap 'rm -rf "$tmp_dir"' EXIT
 
-  local cargo failures=0
-  for cargo in "${CARGOS[@]}"; do
-    show_cargo "$cargo" || failures=$((failures + 1))
+  load_municipios
+
+  local cargo i total=${#MUNI_CODES[@]} failures=0
+  for (( i = 0; i < total; i++ )); do
+    printf '\n==== %s (%s) [%d/%d] ====\n' "${MUNI_NAMES[i]}" "${MUNI_CODES[i]}" "$((i + 1))" "$total"
+    for cargo in "${CARGOS[@]}"; do
+      show_cargo "${MUNI_CODES[i]}" "$cargo" || failures=$((failures + 1))
+    done
   done
-  (( failures == 0 )) || die "$failures cargo(s) com falha; veja os avisos acima"
+  (( failures == 0 )) || die "$failures consulta(s) com falha; veja os avisos acima"
 }
 
 main "$@"
