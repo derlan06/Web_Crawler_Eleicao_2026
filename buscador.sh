@@ -9,6 +9,9 @@ if (( BASH_VERSINFO[0] < 4 || (BASH_VERSINFO[0] == 4 && BASH_VERSINFO[1] < 4) ))
   exit 1
 fi
 
+# Contagem de caracteres (e não de bytes) exige locale UTF-8
+[[ "${LC_ALL:-${LANG:-}}" == *[Uu][Tt][Ff]-8* ]] || export LC_ALL=C.UTF-8
+
 readonly DEFAULT_BASE_URL="https://resultados.tse.jus.br/oficial"
 readonly -a CARGOS=(6 7 5 3 1)
 readonly NAME_HEADER="NOME" NUMBER_HEADER="NÚMERO" VOTES_HEADER="VOTOS"
@@ -50,6 +53,12 @@ setup_color() {
   fi
 }
 
+# pad_right/pad_left TEXTO LARGURA -> resultado em $REPLY.
+# O printf do bash preenche por BYTES e desalinha acentos (NÚMERO, SÃO LUÍS);
+# aqui o preenchimento é por caracteres.
+pad_right() { local n=$(( $2 - ${#1} )); (( n < 0 )) && n=0; printf -v REPLY '%s%*s' "$1" "$n" ''; }
+pad_left()  { local n=$(( $2 - ${#1} )); (( n < 0 )) && n=0; printf -v REPLY '%*s%s' "$n" '' "$1"; }
+
 print_rule() {
   local name_width="$1" number_width="$2" votes_width="$3"
   printf '+-%*s-+-%*s-+-%*s-+\n' "$name_width" '' "$number_width" '' "$votes_width" '' | tr ' ' '-'
@@ -65,15 +74,22 @@ print_table() {
     (( ${#number} > number_width )) && number_width=${#number}
     (( ${#votes} > votes_width )) && votes_width=${#votes}
   done
+  local c1 c2 c3
   print_rule "$name_width" "$number_width" "$votes_width"
-  printf '| %-*s | %*s | %*s |\n' "$name_width" "$NAME_HEADER" "$number_width" "$NUMBER_HEADER" "$votes_width" "$VOTES_HEADER"
+  pad_right "$NAME_HEADER" "$name_width";   c1="$REPLY"
+  pad_left  "$NUMBER_HEADER" "$number_width"; c2="$REPLY"
+  pad_left  "$VOTES_HEADER" "$votes_width";  c3="$REPLY"
+  printf '| %s | %s | %s |\n' "$c1" "$c2" "$c3"
   print_rule "$name_width" "$number_width" "$votes_width"
   for row in "${table_rows[@]}"; do
     IFS=$'\t' read -r name number votes <<<"$row"
+    pad_right "$name" "$name_width";    c1="$REPLY"
+    pad_left  "$number" "$number_width"; c2="$REPLY"
+    pad_left  "$votes" "$votes_width";   c3="$REPLY"
     if $use_color; then
-      printf '| \033[36m%-*s\033[0m | %*s | \033[32m%*s\033[0m |\n' "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes"
+      printf '| \033[36m%s\033[0m | %s | \033[32m%s\033[0m |\n' "$c1" "$c2" "$c3"
     else
-      printf '| %-*s | %*s | %*s |\n' "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes"
+      printf '| %s | %s | %s |\n' "$c1" "$c2" "$c3"
     fi
   done
   print_rule "$name_width" "$number_width" "$votes_width"
