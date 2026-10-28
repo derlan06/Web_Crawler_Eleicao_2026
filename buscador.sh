@@ -13,7 +13,8 @@ fi
 [[ "${LC_ALL:-${LANG:-}}" == *[Uu][Tt][Ff]-8* ]] || export LC_ALL=C.UTF-8
 
 readonly DEFAULT_BASE_URL="https://resultados.tse.jus.br/oficial"
-readonly -a CARGOS=(6 7 5 3 1)
+readonly -a DEFAULT_CARGOS=(6 7 5 3 1)
+CARGOS=("${DEFAULT_CARGOS[@]}")
 readonly NAME_HEADER="NOME" NUMBER_HEADER="NÚMERO" VOTES_HEADER="VOTOS"
 
 BASE_URL="${TSE_RESULTS_BASE_URL:-$DEFAULT_BASE_URL}"
@@ -32,6 +33,41 @@ use_color=false
 die()  { printf 'Erro: %s\n' "$*" >&2; exit 1; }
 warn() { printf 'Aviso: %s\n' "$*" >&2; }
 
+usage() {
+  cat <<'EOT'
+Uso: ./buscador.sh [opções]
+
+Consulta no TSE os candidatos mais votados por cargo.
+
+Opções:
+  -u UF         sigla da UF (padrão: ma)
+  -m CÓDIGO     código TSE do município, 5 dígitos (padrão: 07242)
+  -n LIMITE     máximo de candidatos por cargo (padrão: 20)
+  -c "CARGOS"   cargos separados por espaço: 1=Presidente 3=Governador
+                5=Senador 6=Dep. Federal 7=Dep. Estadual (padrão: "6 7 5 3 1")
+  -h            mostra esta ajuda
+
+Variáveis de ambiente (TSE_RESULTS_*) continuam valendo como padrão;
+as opções de linha de comando têm prioridade sobre elas.
+EOT
+}
+
+parse_args() {
+  local opt OPTIND=1
+  while getopts ':u:m:n:c:h' opt; do
+    case "$opt" in
+      u) UF="$OPTARG" ;;
+      m) MUNICIPIO="$OPTARG" ;;
+      n) LIMIT="$OPTARG" ;;
+      c) read -r -a CARGOS <<<"$OPTARG" ;;
+      h) usage; exit 0 ;;
+      :)  die "a opção -$OPTARG exige um valor (veja -h)" ;;
+      \?) die "opção inválida: -$OPTARG (veja -h)" ;;
+    esac
+  done
+  (( OPTIND > $# )) || die "argumento inesperado: ${!OPTIND} (veja -h)"
+}
+
 validate_config() {
   command -v curl >/dev/null || die "curl não encontrado (instale com seu gerenciador de pacotes)"
   command -v jq   >/dev/null || die "jq não encontrado (instale com seu gerenciador de pacotes)"
@@ -42,6 +78,11 @@ validate_config() {
   [[ "$FEDERAL_ELECTION" =~ ^[0-9]+$ && "$STATE_ELECTION" =~ ^[0-9]+$ ]] \
     || die "códigos de eleição devem ser numéricos"
   [[ "$COLOR_MODE" =~ ^(auto|always|never)$ ]] || die "TSE_RESULTS_COLOR deve ser auto, always ou never"
+  (( ${#CARGOS[@]} > 0 )) || die "informe ao menos um cargo (opção -c)"
+  local cargo
+  for cargo in "${CARGOS[@]}"; do
+    election_for_cargo "$cargo" >/dev/null || die "cargo não suportado: $cargo (use 1, 3, 5, 6 ou 7)"
+  done
   UF="${UF,,}"
   BASE_URL="${BASE_URL%/}"
 }
@@ -157,6 +198,7 @@ show_cargo() {
 }
 
 main() {
+  parse_args "$@"
   validate_config
   setup_color
   tmp_dir="$(mktemp -d)"
