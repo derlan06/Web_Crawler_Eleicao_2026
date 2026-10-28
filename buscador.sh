@@ -24,11 +24,18 @@ MUNICIPIO="${TSE_RESULTS_MUNICIPALITY:-todos}"   # "todos" ou código TSE de 5 d
 LIMIT="${TSE_RESULTS_LIMIT:-20}"
 FEDERAL_ELECTION="${TSE_RESULTS_FEDERAL_ELECTION:-6257}"
 STATE_ELECTION="${TSE_RESULTS_STATE_ELECTION:-6259}"
+# Códigos do 2º turno: por padrão, o código do 1º turno + 1 (padrão observado
+# nas eleições gerais anteriores). Ajuste pelas variáveis se o TSE usar outros.
+FEDERAL_ELECTION_2T="${TSE_RESULTS_FEDERAL_ELECTION_2T:-$((FEDERAL_ELECTION + 1))}"
+STATE_ELECTION_2T="${TSE_RESULTS_STATE_ELECTION_2T:-$((STATE_ELECTION + 1))}"
+ROUND="${TSE_RESULTS_ROUND:-1}"   # 1, 2 ou ambos
 COLOR_MODE="${TSE_RESULTS_COLOR:-auto}"
 
 FETCH_HTTP_CODE=""
 MUNI_CODES=()
 MUNI_NAMES=()
+TURNOS=()
+declare -A NO_DATA=()   # cargo -> nº de consultas sem dados (2º turno)
 tmp_dir=""
 use_color=false
 
@@ -45,6 +52,8 @@ Opções:
   -u UF         sigla da UF (padrão: ma)
   -m MUNICÍPIO  "todos" (padrão) para todos os municípios da UF, ou o
                 código TSE de um município (5 dígitos, ex.: 07242)
+  -t TURNO      1 (padrão), 2 ou ambos. O 2º turno só existe para Presidente
+                e Governador, e apenas onde a disputa não foi decidida no 1º
   -n LIMITE     máximo de candidatos por cargo (padrão: 20)
   -c "CARGOS"   cargos separados por espaço: 1=Presidente 3=Governador
                 5=Senador 6=Dep. Federal 7=Dep. Estadual (padrão: "6 7 5 3 1")
@@ -57,10 +66,11 @@ EOT
 
 parse_args() {
   local opt OPTIND=1
-  while getopts ':u:m:n:c:h' opt; do
+  while getopts ':u:m:t:n:c:h' opt; do
     case "$opt" in
       u) UF="$OPTARG" ;;
       m) MUNICIPIO="$OPTARG" ;;
+      t) ROUND="$OPTARG" ;;
       n) LIMIT="$OPTARG" ;;
       c) read -r -a CARGOS <<<"$OPTARG" ;;
       h) usage; exit 0 ;;
@@ -83,10 +93,19 @@ validate_config() {
   [[ "$FEDERAL_ELECTION" =~ ^[0-9]+$ && "$STATE_ELECTION" =~ ^[0-9]+$ ]] \
     || die "códigos de eleição devem ser numéricos"
   [[ "$COLOR_MODE" =~ ^(auto|always|never)$ ]] || die "TSE_RESULTS_COLOR deve ser auto, always ou never"
+  [[ "$FEDERAL_ELECTION_2T" =~ ^[0-9]+$ && "$STATE_ELECTION_2T" =~ ^[0-9]+$ ]] \
+    || die "códigos de eleição do 2º turno devem ser numéricos"
+  ROUND="${ROUND,,}"
+  case "$ROUND" in
+    1) TURNOS=(1) ;;
+    2) TURNOS=(2) ;;
+    ambos|1,2|1-2) TURNOS=(1 2) ;;
+    *) die "turno deve ser 1, 2 ou ambos (-t / TSE_RESULTS_ROUND)" ;;
+  esac
   (( ${#CARGOS[@]} > 0 )) || die "informe ao menos um cargo (opção -c)"
   local cargo
   for cargo in "${CARGOS[@]}"; do
-    election_for_cargo "$cargo" >/dev/null || die "cargo não suportado: $cargo (use 1, 3, 5, 6 ou 7)"
+    election_for_cargo "$cargo" 1 >/dev/null || die "cargo não suportado: $cargo (use 1, 3, 5, 6 ou 7)"
   done
   UF="${UF,,}"
   BASE_URL="${BASE_URL%/}"
@@ -141,12 +160,17 @@ print_table() {
   print_rule "$name_width" "$number_width" "$votes_width"
 }
 
-# Retorna o código da eleição do cargo; status 1 se o cargo não for suportado.
+# election_for_cargo CARGO TURNO -> código da eleição no stdout.
+# Status 1: cargo não suportado; status 2: cargo sem 2º turno.
 election_for_cargo() {
-  case "$1" in
-    1)         printf '%s' "$FEDERAL_ELECTION" ;;
-    3|5|6|7)   printf '%s' "$STATE_ELECTION" ;;
-    *)         return 1 ;;
+  local cargo="$1" turno="$2"
+  case "$cargo:$turno" in
+    1:1)         printf '%s' "$FEDERAL_ELECTION" ;;
+    3:1|5:1|6:1|7:1) printf '%s' "$STATE_ELECTION" ;;
+    1:2)         printf '%s' "$FEDERAL_ELECTION_2T" ;;
+    3:2)         printf '%s' "$STATE_ELECTION_2T" ;;
+    5:2|6:2|7:2) return 2 ;;
+    *)           return 1 ;;
   esac
 }
 
@@ -195,27 +219,39 @@ load_municipios() {
   fi
 }
 
-# show_cargo MUNICÍPIO CARGO -> imprime a tabela do cargo; status 1 em caso de falha (já avisada).
+# show_cargo MUNICÍPIO TURNO CARGO -> imprime a tabela do cargo.
+# Status 1: falha (já avisada); 2: sem dados (esperado no 2º turno);
+# 3: não se aplica (cargo sem 2º turno).
 show_cargo() {
-  local muni="$1" cargo="$2" election file rows_file url cargo_name cargo_padded election_padded
+  local muni="$1" turno="$2" cargo="$3" election file rows_file url cargo_name cargo_padded election_padded
   local -a rows=()
 
-  election="$(election_for_cargo "$cargo")" || { warn "cargo não suportado: $cargo"; return 1; }
-  file="$tmp_dir/cargo-$cargo.json"
-  rows_file="$tmp_dir/cargo-$cargo.tsv"
+  local rc=0
+  election="$(election_for_cargo "$cargo" "$turno")" || rc=$?
+  case "$rc" in
+    0) ;;
+    2) return 3 ;;   # cargo sem 2º turno: não se aplica, não é falha
+    *) warn "cargo não suportado: $cargo"; return 1 ;;
+  esac
+  file="$tmp_dir/cargo-$cargo-t$turno.json"
+  rows_file="$tmp_dir/cargo-$cargo-t$turno.tsv"
   printf -v cargo_padded '%04d' "$cargo"
   printf -v election_padded '%06d' "$election"
   url="$BASE_URL/ele$YEAR/$election/dados/$UF/${UF}${muni}-c${cargo_padded}-e${election_padded}-u.json"
 
-  fetch_json "$url" "$file" \
-    || { warn "falha ao consultar o cargo $cargo no município $muni (HTTP $FETCH_HTTP_CODE): $url"; return 1; }
+  if ! fetch_json "$url" "$file"; then
+    # 2º turno inexistente (cargo decidido no 1º turno) aparece como HTTP 404
+    [[ "$turno" == 2 && "$FETCH_HTTP_CODE" == 404 ]] && return 2
+    warn "falha ao consultar o cargo $cargo (${turno}º turno) no município $muni (HTTP $FETCH_HTTP_CODE): $url"
+    return 1
+  fi
   jq -e '.carg | type == "array"' "$file" >/dev/null 2>&1 \
     || { warn "resposta inválida para o cargo $cargo (JSON sem a lista 'carg')"; return 1; }
 
   cargo_name="$(jq -r --arg cargo "$cargo" '.carg[] | select(.cd == $cargo) | .nmn' "$file" | head -n 1)"
   [[ -n "$cargo_name" ]] || { warn "cargo $cargo ausente na resposta"; return 1; }
 
-  printf '\n%s (cargo %s)\n' "$cargo_name" "$cargo"
+  printf '\n%s (cargo %s) - %dº TURNO\n' "$cargo_name" "$cargo" "$turno"
 
   jq -r --arg cargo "$cargo" --argjson limit "$LIMIT" '
     [
@@ -238,6 +274,16 @@ show_cargo() {
   print_table rows
 }
 
+# Resume (uma vez só) o que não tinha dados, em vez de repetir por município.
+report_no_data() {
+  local key
+  (( ${#NO_DATA[@]} > 0 )) || return 0
+  printf '\nSem dados disponíveis (normal quando o cargo não teve 2º turno ou a apuração não terminou):\n'
+  for key in $(printf '%s\n' "${!NO_DATA[@]}" | sort); do
+    printf '  cargo %s, %sº turno: %s consulta(s)\n' "${key%%:*}" "${key##*:}" "${NO_DATA[$key]}"
+  done
+}
+
 main() {
   parse_args "$@"
   validate_config
@@ -247,13 +293,22 @@ main() {
 
   load_municipios
 
-  local cargo i total=${#MUNI_CODES[@]} failures=0
+  local cargo turno rc i total=${#MUNI_CODES[@]} failures=0
   for (( i = 0; i < total; i++ )); do
     printf '\n==== %s (%s) [%d/%d] ====\n' "${MUNI_NAMES[i]}" "${MUNI_CODES[i]}" "$((i + 1))" "$total"
-    for cargo in "${CARGOS[@]}"; do
-      show_cargo "${MUNI_CODES[i]}" "$cargo" || failures=$((failures + 1))
+    for turno in "${TURNOS[@]}"; do
+      for cargo in "${CARGOS[@]}"; do
+        rc=0
+        show_cargo "${MUNI_CODES[i]}" "$turno" "$cargo" || rc=$?
+        case "$rc" in
+          0|3) ;;
+          2) NO_DATA[$cargo:$turno]=$(( ${NO_DATA[$cargo:$turno]:-0} + 1 )) ;;
+          *) failures=$((failures + 1)) ;;
+        esac
+      done
     done
   done
+  report_no_data
   (( failures == 0 )) || die "$failures consulta(s) com falha; veja os avisos acima"
 }
 
